@@ -13,6 +13,7 @@ void print(Vector<int>& v) {
 }
 
 int main() {
+    Vector<bool> invalid;
     Vector<int> v;
 
     v.push_back(30);

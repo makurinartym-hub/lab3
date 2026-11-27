@@ -20,17 +20,33 @@ concept Numeric =
     && !std::is_const_v<T>
     && !std::is_volatile_v<T>;
 
-template <Numeric T>
+template <Numeric T, typename Allocator = std::allocator<T>>
 class Vector {
 private:
+    using Traits = std::allocator_traits<Allocator>;
+
+    static_assert(
+        std::same_as<typename Traits::value_type, T>,
+        "Allocator value_type must match T"
+    );
+
+    static_assert(
+        std::same_as<typename Traits::pointer, T*>,
+        "Allocator must use ordinary pointers"
+    );
+
+    static_assert(
+        Traits::is_always_equal::value,
+        "Allocator instances must be interchangeable"
+    );
+
     T* data_;
     std::size_t size_;
     std::size_t capacity_;
-    std::allocator<T> allocator_;
+    Allocator allocator_;
 
     void grow() {
-        const auto limit =
-            std::allocator_traits<std::allocator<T>>::max_size(allocator_);
+        const auto limit = Traits::max_size(allocator_);
 
         if (capacity_ >= limit) {
             throw std::length_error("Vector is too large");
@@ -46,13 +62,14 @@ private:
     }
 
 public:
-    Vector() : data_(nullptr), size_(0), capacity_(0) {}
+    Vector()
+        : data_(nullptr), size_(0), capacity_(0) {}
 
     ~Vector() {
         clear();
 
         if (data_ != nullptr) {
-            allocator_.deallocate(data_, capacity_);
+            Traits::deallocate(allocator_, data_, capacity_);
         }
     }
 
@@ -64,7 +81,9 @@ public:
         }
     }
 
-    Vector(Vector&& other) noexcept : Vector() {
+    Vector(Vector&& other)
+        noexcept(std::is_nothrow_default_constructible_v<Allocator>)
+        : Vector() {
         swap(other);
     }
 
@@ -74,7 +93,8 @@ public:
         return *this;
     }
 
-    Vector& operator=(Vector&& other) noexcept {
+    Vector& operator=(Vector&& other)
+        noexcept(std::is_nothrow_default_constructible_v<Allocator>) {
         Vector temp(std::move(other));
         swap(temp);
         return *this;
@@ -103,51 +123,68 @@ public:
             return;
         }
 
-        const auto limit =
-            std::allocator_traits<std::allocator<T>>::max_size(allocator_);
+        const auto limit = Traits::max_size(allocator_);
 
         if (new_capacity > limit) {
             throw std::length_error("Vector is too large");
         }
 
-        T* new_data = allocator_.allocate(new_capacity);
+        T* new_data = Traits::allocate(allocator_, new_capacity);
         std::size_t constructed = 0;
 
         try {
             for (; constructed < size_; ++constructed) {
-                std::construct_at(
+                Traits::construct(
+                    allocator_,
                     new_data + constructed,
                     std::move_if_noexcept(data_[constructed])
                 );
             }
         } catch (...) {
             for (std::size_t i = 0; i < constructed; ++i) {
-                std::destroy_at(new_data + i);
+                Traits::destroy(allocator_, new_data + i);
             }
 
-            allocator_.deallocate(new_data, new_capacity);
+            Traits::deallocate(
+                allocator_,
+                new_data,
+                new_capacity
+            );
+
             throw;
         }
 
         for (std::size_t i = 0; i < size_; ++i) {
-            std::destroy_at(data_ + i);
+            Traits::destroy(allocator_, data_ + i);
         }
 
         if (data_ != nullptr) {
-            allocator_.deallocate(data_, capacity_);
+            Traits::deallocate(allocator_, data_, capacity_);
         }
 
         data_ = new_data;
         capacity_ = new_capacity;
     }
 
-    void push_back(const T& value) {
+    void push_back(const T& value)
+
+
+{
         if (size_ == capacity_) {
             T saved(value);
             grow();
-            std::construct_at(data_ + size_, saved);
+
+            Traits::construct(
+                allocator_,
+                data_ + size_,
+                saved
+            );
         } else {
-            std::construct_at(data_ + size_, value);
+            Traits::construct(
+                allocator_,
+                data_ + size_,
+                value
+            );
         }
 
         ++size_;
@@ -157,9 +194,18 @@ public:
         if (size_ == capacity_) {
             T saved(std::move(value));
             grow();
-            std::construct_at(data_ + size_, std::move(saved));
+
+            Traits::construct(
+                allocator_,
+                data_ + size_,
+                std::move(saved)
+            );
         } else {
-            std::construct_at(data_ + size_, std::move(value));
+            Traits::construct(
+                allocator_,
+                data_ + size_,
+                std::move(value)
+            );
         }
 
         ++size_;
@@ -170,13 +216,13 @@ public:
             return;
         }
 
-        std::destroy_at(data_ + size_ - 1);
+        Traits::destroy(allocator_, data_ + size_ - 1);
         --size_;
     }
 
     void clear() {
         for (std::size_t i = 0; i < size_; ++i) {
-            std::destroy_at(data_ + i);
+            Traits::destroy(allocator_, data_ + i);
         }
 
         size_ = 0;
@@ -191,7 +237,7 @@ public:
             reserve(new_size);
 
             while (size_ < new_size) {
-                std::construct_at(data_ + size_);
+                Traits::construct(allocator_, data_ + size_);
                 ++size_;
             }
         }
@@ -237,52 +283,60 @@ public:
         return data_[size_ - 1];
     }
 
-    class Iterator {
-    private:
-        T* ptr_;
-
+    template <bool IsConst>
+    class BasicIterator {
     public:
         using value_type = T;
         using difference_type = std::ptrdiff_t;
-        using pointer = T*;
-        using reference = T&;
-        using iterator_category = std::random_access_iterator_tag;
 
-        Iterator() : ptr_(nullptr) {}
+        using pointer =
+            std::conditional_t<IsConst, const T*, T*>;
 
-        explicit Iterator(T* ptr) : ptr_(ptr) {}
+        using reference =
+            std::conditional_t<IsConst, const T&, T&>;
 
-        T& operator*() const {
+        using iterator_category =
+            std::random_access_iterator_tag;
+
+    private:
+        pointer ptr_ = nullptr;
+
+    public:
+        BasicIterator() = default;
+
+        explicit BasicIterator(pointer ptr) : ptr_(ptr) {}
+
+        reference operator*() const {
             return *ptr_;
         }
 
-        T* operator->() const {
+        pointer operator->() const {
             return ptr_;
         }
 
-        Iterator& operator++() {
+        BasicIterator& operator++() {
             ++ptr_;
             return *this;
         }
 
-        Iterator operator++(int) {
-            Iterator old = *this;
+        BasicIterator operator++(int) {
+            BasicIterator old = *this;
             ++(*this);
             return old;
         }
 
-        Iterator& operator--() {
+        BasicIterator& operator--() {
             --ptr_;
             return *this;
         }
 
-        Iterator operator--(int) {
-            Iterator old = *this;
+        BasicIterator operator--(int) {
+            BasicIterator old = *this;
             --(*this);
             return old;
         }
 
-        Iterator& operator+=(difference_type offset) {
+        BasicIterator& operator+=(difference_type offset) {
             if (offset != 0) {
                 ptr_ += offset;
             }
@@ -290,7 +344,7 @@ public:
             return *this;
         }
 
-        Iterator& operator-=(difference_type offset) {
+        BasicIterator& operator-=(difference_type offset) {
             if (offset != 0) {
                 ptr_ -= offset;
             }
@@ -298,19 +352,22 @@ public:
             return *this;
         }
 
-        Iterator operator+(difference_type offset) const {
-            Iterator result = *this;
+        BasicIterator operator+(difference_type offset) const {
+            BasicIterator result = *this;
             result += offset;
             return result;
         }
 
-        Iterator operator-(difference_type offset) const {
-            Iterator result = *this;
+        BasicIterator operator-(difference_type
+
+
+offset) const {
+            BasicIterator result = *this;
             result -= offset;
             return result;
         }
 
-        difference_type operator-(const Iterator& other) const {
+        difference_type operator-(const BasicIterator& other) const {
             if (ptr_ == other.ptr_) {
                 return 0;
             }
@@ -318,51 +375,66 @@ public:
             return ptr_ - other.ptr_;
         }
 
-        bool operator==(const Iterator& other) const {
+        bool operator==(const BasicIterator& other) const {
             return ptr_ == other.ptr_;
         }
 
-        bool operator!=(const Iterator& other) const {
+        bool operator!=(const BasicIterator& other) const {
             return ptr_ != other.ptr_;
         }
 
-        bool operator<(const Iterator& other) const {
+        bool operator<(const BasicIterator& other) const {
             return ptr_ < other.ptr_;
         }
 
-        bool operator>(const Iterator& other) const {
+        bool operator>(const BasicIterator& other) const {
             return ptr_ > other.ptr_;
         }
 
-        bool operator<=(const Iterator& other) const {
+        bool operator<=(const BasicIterator& other) const {
             return ptr_ <= other.ptr_;
         }
 
-        bool operator>=(const Iterator& other) const {
+        bool operator>=(const BasicIterator& other) const {
             return ptr_ >= other.ptr_;
         }
 
-        T& operator[](difference_type offset) const {
+        reference operator[](difference_type offset) const {
             return *(ptr_ + offset);
         }
 
-        friend Iterator operator+(
+        friend BasicIterator operator+(
             difference_type offset,
-            const Iterator& it
+            const BasicIterator& it
         ) {
             return it + offset;
         }
     };
+
+    using Iterator = BasicIterator<false>;
+    using ConstIterator = BasicIterator<true>;
 
     Iterator begin() {
         return Iterator(data_);
     }
 
     Iterator end() {
-        if (empty()) {
-            return Iterator(data_);
-        }
+        return Iterator(empty() ? data_ : data_ + size_);
+    }
 
-        return Iterator(data_ + size_);
+    ConstIterator begin() const {
+        return ConstIterator(data_);
+    }
+
+    ConstIterator end() const {
+        return ConstIterator(empty() ? data_ : data_ + size_);
+    }
+
+    ConstIterator cbegin() const {
+        return begin();
+    }
+
+    ConstIterator cend() const {
+        return end();
     }
 };
